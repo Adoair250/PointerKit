@@ -1,0 +1,6 @@
+build/
+*.o
+*.res
+*.exe
+*.ini
+*.log
