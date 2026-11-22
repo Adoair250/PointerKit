@@ -14,12 +14,13 @@
 |---|---|
 | ボタン割り当て | 各ボタンを、キー入力（Ctrl+W など）、戻る／進む、ウィンドウ操作、ホイール操作などに変更 |
 | 長押し・2回押し | 同じボタンでも、長押し・すばやい2回押しで別の動作に |
-| 同時押し | 「左を押しながら進む」のような組み合わせに動作を割り当て |
+| 同時押し | 「左を押しながら進む」のような組み合わせに動作を割り当て（スクロールに使うボタンを押さえる側にもできます） |
 | ボールスクロール | ボタンを押しながらボールを動かして縦・横にスクロール（速さ・加速・慣性を調整可能） |
 | ジェスチャー | ボタンを押したままマウスを動かして、戻る・進む・タブを閉じるなど |
 | 画面の四隅 | カーソルを角に当てて、タスクビューやデスクトップ表示などを実行 |
 | タッチパッドの辺 | ノートPCのタッチパッドの辺をなぞって、音量・明るさ・スクロールなどを操作 |
 | US配列キーボード | Windows は日本語配列のまま、US配列キーボードで刻印どおりに入力（接続中だけ自動で切り替え） |
+| マウスごとの設定 | マウスを何台か使うとき、マウスごとに別の設定を持ち、動かしたマウスに合わせて自動で切り替え |
 | そのほか | ボタン確認表示、ダークモード、設定の書き出し・読み込み |
 
 X-Mouse Button Control と W10Wheel、USkey2JP の役割を 1 本にまとめたものです。
@@ -62,4 +63,4 @@ sh build.sh build
 
 ### English
 
-PointerKit is a portable Windows utility for mice, trackballs, touchpads and keyboards: button remapping, long-press / double-click actions, chords, trackball scrolling with inertia, mouse gestures, hot corners, touchpad edge controls and US-keyboard-on-JIS-layout conversion. The UI is Japanese only. Download the zip from [Releases](../../releases/latest).
+PointerKit is a portable Windows utility for mice, trackballs, touchpads and keyboards: button remapping, long-press / double-click actions, chords, trackball scrolling with inertia, mouse gestures, hot corners, per-mouse profiles that switch automatically, touchpad edge controls and US-keyboard-on-JIS-layout conversion. The UI is Japanese only. Download the zip from [Releases](../../releases/latest).

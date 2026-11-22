@@ -6,7 +6,19 @@
 static const ULONG_PTR kMagic = 0x4F4E454DUL;   // 自分が送った入力の目印 ('ONEM')
 static HHOOK g_hook = nullptr;
 static HWND  g_hookWnd = nullptr;     // フック用スレッドのメッセージ窓（タイマー用）
-static Config g_hc;
+static Config g_hc;          // いま使っている設定（マウスごとの設定を反映済み）
+static Config g_base;        // 保存されている設定（マウスごとの設定を含む）
+static int g_active = -1;    // 使っているマウスごとの設定（-1 = 共通）
+static volatile int g_activeOut = -1;
+int ActiveProfile() { return g_activeOut; }
+static SRWLOCK g_lastMouseLock = SRWLOCK_INIT;
+static std::wstring g_lastMouseId;
+std::wstring LastMouseId() {
+    AcquireSRWLockShared(&g_lastMouseLock);
+    std::wstring r = g_lastMouseId;
+    ReleaseSRWLockShared(&g_lastMouseLock);
+    return r;
+}
 static HWND volatile g_monitor = nullptr;
 static volatile DWORD g_lastTick = 0;
 static volatile unsigned g_calls = 0, g_slow = 0;
@@ -231,6 +243,8 @@ static bool  g_scrolling = false;      // スクロールモード（カーソ�
 static bool  g_scrollStarted = false;  // しきい値を超えて動いたか
 static Btn   g_scrollOwner = B_NONE;
 static POINT g_anchor = {};
+static DWORD g_scrollDownTick = 0;   // トリガーを押した時刻
+static int   g_scrollTravel = 0;     // 押してから動いた量の合計（px）
 static double g_accV = 0, g_accH = 0;
 static int   g_lockAxis = 0;           // 0=未定 1=縦 2=横
 static int   g_cursorShape = 0;
@@ -256,6 +270,11 @@ static void SetScrollCursor(int shape) {
     PostMessageW(g_hwnd, WM_SETSCROLLCURSOR, (WPARAM)shape, 0);
 }
 
+static const DWORD kClickGraceMs = 150;   // 押してからこの時間は
+static const int   kClickGracePx = 8;     // この量を超えるまでスクロールを始めない
+static const DWORD kClickRescueMs = 300;  // この時間内に離し
+static const int   kClickRescuePx = 16;   // 動いた量がこれ以下ならクリック扱い
+
 static void ResetInertia();
 static void StartScrollMode(Btn owner, POINT pt) {
     ResetInertia();
@@ -263,6 +282,8 @@ static void StartScrollMode(Btn owner, POINT pt) {
     g_scrollStarted = false;
     g_scrollOwner = owner;
     g_anchor = pt;
+    g_scrollDownTick = GetTickCount();
+    g_scrollTravel = 0;
     g_accV = g_accH = 0;
     g_lockAxis = 0;
 }
@@ -558,6 +579,19 @@ static LRESULT HandleButtonDown(Btn b, POINT pt) {
         if (hs == S_PENDING) FlushPending((Btn)h, pt, false);
     }
 
+    // スクロールのボタンを押さえたまま別のボタンを押した → 同時押しの動作があればそれを実行
+    for (int h = 0; h < B_COUNT; h++) {
+        if (h == b || g_state[h] != S_TRIGGER) continue;
+        if (const Action* pa = FindChord(h, b)) {
+            Action a = *pa;
+            if (g_scrollStarted) ResetInertia();
+            EndScrollMode();
+            g_state[h] = S_CHORDED;   // 押さえ側を離してもクリックにしない
+            if (a.type != A_DISABLE) { RunActionDown(a, pt); RunActionUp(a); }
+            g_state[b] = S_SWALLOW;
+            return 1;
+        }
+    }
     // スクロール中に押された他のボタンはそのまま通す
     if (g_scrolling) { g_state[b] = S_PASSED; return 0; }
 
@@ -613,6 +647,8 @@ static LRESULT HandleButtonUp(Btn b, POINT pt) {
         return 1;
     case S_TRIGGER: {
         bool started = g_scrollStarted;
+        // すぐ離して、ほとんど動いていなければ「クリック」とみなす（ブレでスクロールが始まっても右クリックを失わない）
+        if (started && GetTickCount() - g_scrollDownTick < kClickRescueMs && g_scrollTravel <= kClickRescuePx) started = false;
         if (started) StartInertia();
         EndScrollMode();
         g_state[b] = S_IDLE;
@@ -779,11 +815,17 @@ static LRESULT CALLBACK LowLevelMouseProcBody(int nCode, WPARAM wp, LPARAM lp) {
         if (g_scrolling) {
             int dx = pt.x - g_anchor.x, dy = pt.y - g_anchor.y;
             if (!g_scrollStarted) {
-                if (std::abs(dx) + std::abs(dy) <= g_hc.dragThreshold) return 1;  // まだクリック扱い
+                // クリックのつもりで押したときの小さなブレではスクロールを始めない。
+                // 押してから少しの間は、しきい値より大きく動くまで待つ。
+                g_scrollTravel += std::abs(dx) + std::abs(dy);
+                int lim = g_hc.dragThreshold;
+                if (GetTickCount() - g_scrollDownTick < kClickGraceMs) lim = std::max(lim, kClickGracePx);
+                if (g_scrollTravel <= lim) return 1;  // まだクリック扱い
                 g_scrollStarted = true;
                 static int s_sc = 0;
                 if (s_sc < 20) { s_sc++; Log(L"ボールスクロール開始（%ls ボタン）", g_scrollOwner >= 0 ? kBtnNames[g_scrollOwner] : L"?"); }
             }
+            g_scrollTravel += std::abs(dx) + std::abs(dy);
             DoScroll(dx, dy);
             return 1;   // カーソルは動かさない
         }
@@ -836,6 +878,23 @@ static bool InstallHookInThread() {
 }
 
 // 設定変更・無効化のときに、押しっぱなし扱いのものを片付ける
+static Config EffectiveConfig(int idx) {
+    Config r = (idx >= 0 && idx < (int)g_base.profiles.size()) ? MergeMouse(g_base, g_base.profiles[idx].cfg) : g_base;
+    r.profiles.clear();
+    return r;
+}
+// 最後に動かしたマウスの設定に切り替える（ボタンを押していない・スクロールしていないときだけ）
+static void SwitchProfile(int idx) {
+    if (idx == g_active) return;
+    g_active = idx;
+    g_activeOut = idx;
+    g_hc = EffectiveConfig(idx);
+    std::wstring name = idx >= 0 ? g_base.profiles[idx].name : std::wstring(L"共通の設定");
+    static int s_pl = 0;
+    if (s_pl < 30) { s_pl++; Log(L"マウスの設定を切り替え：%ls", name.c_str()); }
+    if (g_base.profileOsd) PostMessageW(g_hwnd, WM_TPOSD, 0, (LPARAM)new std::wstring(L"マウスの設定：" + name));
+}
+
 static void ResetHookStateInThread() {
     ReleaseAllForDisable();
     EndScrollMode();
@@ -854,9 +913,29 @@ static LRESULT CALLBACK HookWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WMH_SETCONFIG: {
         Config* c = (Config*)lp;
         ResetHookStateInThread();
-        g_hc = *c;
+        g_base = *c;
         delete c;
+        if (g_active >= (int)g_base.profiles.size()) g_active = -1;
+        g_activeOut = g_active;
+        g_hc = EffectiveConfig(g_active);
         return 0;
+    }
+    case WM_INPUT: {
+        RAWINPUTHEADER hdr; UINT sz = sizeof(hdr);
+        if ((!g_base.profiles.empty() || g_monitor) &&
+            GetRawInputData((HRAWINPUT)lp, RID_HEADER, &hdr, &sz, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
+            hdr.dwType == RIM_TYPEMOUSE && hdr.hDevice) {
+            std::wstring id = DeviceIdFromHandle(hdr.hDevice);
+            if (g_monitor) {   // 設定画面に「いま動かしたマウス」を出すため
+                AcquireSRWLockExclusive(&g_lastMouseLock);
+                g_lastMouseId = id;
+                ReleaseSRWLockExclusive(&g_lastMouseLock);
+            }
+            int idx = -1;
+            for (int i = 0; i < (int)g_base.profiles.size(); i++) if (g_base.profiles[i].id == id) idx = i;
+            if (idx != g_active && AllIdle()) SwitchProfile(idx);
+        }
+        return DefWindowProcW(h, msg, wp, lp);
     }
     case WMH_REINSTALL:
         ResetHookStateInThread();
@@ -879,6 +958,9 @@ static DWORD WINAPI HookThread(LPVOID) {
     RegisterClassW(&wc);
     g_hookWnd = CreateWindowW(wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, g_hinst, nullptr);
     g_hookOk = InstallHookInThread();
+    // どのマウスを動かしたかを知るため、マウスの生の入力を受け取る
+    RAWINPUTDEVICE rid = { 0x01, 0x02, RIDEV_INPUTSINK, g_hookWnd };
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) Log(L"マウスの生の入力の登録に失敗 (err=%lu)", GetLastError());
     SetEvent(g_hookReady);
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) DispatchMessageW(&m);
@@ -894,7 +976,7 @@ static DWORD g_hookThreadId = 0;
 
 // 設定をフック用スレッドに渡す
 void SetHookConfig(const Config& c) {
-    if (!g_hookWnd) { g_hc = c; return; }
+    if (!g_hookWnd) { g_base = c; g_hc = EffectiveConfig(-1); return; }
     PostMessageW(g_hookWnd, WMH_SETCONFIG, 0, (LPARAM)new Config(c));
 }
 
@@ -914,7 +996,8 @@ bool InstallHook() {
         for (int b = 0; b < B_COUNT; b++) g_state[b] = S_IDLE;
         g_scrolling = false; g_scrollStarted = false;
     }
-    g_hc = g_cfg;
+    g_base = g_cfg;
+    g_hc = EffectiveConfig(g_active);
     StartSender();
     if (!g_hookReady) g_hookReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     ResetEvent(g_hookReady);

@@ -97,7 +97,7 @@ LRESULT UsKeyboardProc(HHOOK hook, int n, WPARAM wp, LPARAM lp) {
 static std::wstring KbId(const std::wstring& name0) {
     std::wstring name = name0;
     for (auto& c : name) c = (wchar_t)towupper(c);
-    if (name.find(L"RDP_KBD") != std::wstring::npos) return L"";      // リモートデスクトップの仮想キーボード
+    if (name.find(L"RDP_KBD") != std::wstring::npos || name.find(L"RDP_MOU") != std::wstring::npos) return L"";      // リモートデスクトップの仮想キーボード
     size_t v = name.find(L"VID");
     if (v != std::wstring::npos) {
         size_t p = name.find(L"PID", v);
@@ -114,7 +114,23 @@ static std::wstring KbId(const std::wstring& name0) {
     return name;
 }
 
-std::vector<KbInfo> ListKeyboards(bool names) {
+static std::vector<KbInfo> ListDevices(DWORD type, bool names);
+std::vector<KbInfo> ListKeyboards(bool names) { return ListDevices(RIM_TYPEKEYBOARD, names); }
+std::vector<KbInfo> ListMice(bool names) { return ListDevices(RIM_TYPEMOUSE, names); }
+
+// 生の入力のデバイスハンドル → ID（つなぎ直すとハンドルが変わるので、見つからなければ調べ直す）
+std::wstring DeviceIdFromHandle(HANDLE h) {
+    static std::vector<std::pair<HANDLE, std::wstring>> cache;
+    for (auto& c : cache) if (c.first == h) return c.second;
+    wchar_t nm[512]; UINT sz = 512;
+    std::wstring id;
+    if (GetRawInputDeviceInfoW(h, RIDI_DEVICENAME, nm, &sz) != (UINT)-1) id = KbId(nm);
+    if (cache.size() > 64) cache.clear();
+    cache.push_back({ h, id });
+    return id;
+}
+
+static std::vector<KbInfo> ListDevices(DWORD type, bool names) {
     std::vector<KbInfo> r;
     UINT n = 0;
     if (GetRawInputDeviceList(nullptr, &n, sizeof(RAWINPUTDEVICELIST)) != 0 || n == 0) return r;
@@ -122,7 +138,7 @@ std::vector<KbInfo> ListKeyboards(bool names) {
     n = GetRawInputDeviceList(list.data(), &n, sizeof(RAWINPUTDEVICELIST));
     if (n == (UINT)-1) return r;
     for (UINT i = 0; i < n; i++) {
-        if (list[i].dwType != RIM_TYPEKEYBOARD) continue;
+        if (list[i].dwType != type) continue;
         wchar_t nm[512]; UINT sz = 512;
         if (GetRawInputDeviceInfoW(list[i].hDevice, RIDI_DEVICENAME, nm, &sz) == (UINT)-1) continue;
         std::wstring name = nm;
@@ -137,7 +153,7 @@ std::vector<KbInfo> ListKeyboards(bool names) {
         for (auto& c : up) c = (wchar_t)towupper(c);
         if (!names) {
         } else if (up.find(L"VID") == std::wstring::npos) {
-            k.name = L"ノートPC本体のキーボード";
+            k.name = type == RIM_TYPEKEYBOARD ? L"ノートPC本体のキーボード" : L"ノートPC本体のタッチパッド・ポインター";
         } else {
             HANDLE h = CreateFileW(name.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
             wchar_t prod[128] = {};
@@ -145,7 +161,7 @@ std::vector<KbInfo> ListKeyboards(bool names) {
                 if (!HidD_GetProductString(h, prod, sizeof(prod))) prod[0] = 0;
                 CloseHandle(h);
             }
-            k.name = prod[0] ? std::wstring(prod) : std::wstring(L"外付けキーボード");
+            k.name = prod[0] ? std::wstring(prod) : std::wstring(type == RIM_TYPEKEYBOARD ? L"外付けキーボード" : L"マウス");
             k.name += L"（" + id + L"）";
         }
         r.push_back(k);

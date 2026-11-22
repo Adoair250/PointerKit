@@ -225,9 +225,24 @@ void InitConfigPath() {
     g_iniPath = dir + L"\\PointerKit.ini";
 }
 
+// マウスごとの設定：マウスに関する項目は "P1.Buttons" のような別の見出しに保存する
+static std::wstring g_secPre;       // 見出しの前に付ける文字（空 = 共通の設定）
+static bool g_mouseOnly = false;    // マウスに関する項目だけを書き込む
+static bool IsMouseSec(const wchar_t* sec) {
+    static const wchar_t* m[] = { L"Buttons", L"Chords", L"Scroll", L"Gesture", L"LongPress", L"DoubleClick" };
+    for (auto x : m) if (!wcscmp(sec, x)) return true;
+    return false;
+}
+static std::wstring Sec(const wchar_t* sec) { return IsMouseSec(sec) ? g_secPre + sec : std::wstring(sec); }
+static bool Skip(const wchar_t* sec) { return g_mouseOnly && !IsMouseSec(sec); }
+static void IniDel(const wchar_t* sec, const wchar_t* key) {
+    if (Skip(sec)) return;
+    WritePrivateProfileStringW(Sec(sec).c_str(), key, nullptr, g_iniPath.c_str());
+}
+
 static std::wstring IniGet(const wchar_t* sec, const wchar_t* key, const wchar_t* def) {
     wchar_t buf[512];
-    GetPrivateProfileStringW(sec, key, def, buf, 512, g_iniPath.c_str());
+    GetPrivateProfileStringW(Sec(sec).c_str(), key, def, buf, 512, g_iniPath.c_str());
     std::wstring s = buf;
     size_t p = s.find(L';');            // 「;」以降はコメント
     if (p != std::wstring::npos) s = s.substr(0, p);
@@ -243,7 +258,8 @@ static bool IniBool(const wchar_t* sec, const wchar_t* key, bool def) {
     return v == L"1" || v == L"TRUE" || v == L"ON" || v == L"YES";
 }
 static void IniPut(const wchar_t* sec, const wchar_t* key, const std::wstring& v) {
-    WritePrivateProfileStringW(sec, key, v.c_str(), g_iniPath.c_str());
+    if (Skip(sec)) return;
+    WritePrivateProfileStringW(Sec(sec).c_str(), key, v.c_str(), g_iniPath.c_str());
 }
 static void IniPut(const wchar_t* sec, const wchar_t* key, int v) { IniPut(sec, key, std::to_wstring(v)); }
 
@@ -269,8 +285,7 @@ FILETIME GetIniTime() {
     return FILETIME{};
 }
 
-void SaveConfig(const Config& c) {
-    EnsureIniFile();
+static void SaveBody(const Config& c) {
     IniPut(L"General", L"Enabled", c.enabled ? 1 : 0);
     for (int b = 0; b < B_COUNT; b++) IniPut(L"Buttons", kBtnNames[b], ActionToString(c.button[b]));
 
@@ -284,9 +299,9 @@ void SaveConfig(const Config& c) {
             IniPut(L"Chords", (n + L"Button").c_str(), kBtnNames[ch.pressed]);
             IniPut(L"Chords", (n + L"Action").c_str(), ActionToString(ch.action));
         } else {
-            WritePrivateProfileStringW(L"Chords", (n + L"Held").c_str(), nullptr, g_iniPath.c_str());
-            WritePrivateProfileStringW(L"Chords", (n + L"Button").c_str(), nullptr, g_iniPath.c_str());
-            WritePrivateProfileStringW(L"Chords", (n + L"Action").c_str(), nullptr, g_iniPath.c_str());
+            IniDel(L"Chords", (n + L"Held").c_str());
+            IniDel(L"Chords", (n + L"Button").c_str());
+            IniDel(L"Chords", (n + L"Action").c_str());
         }
     }
 
@@ -348,16 +363,58 @@ void SaveConfig(const Config& c) {
             IniPut(L"Gesture", n.c_str(), c.gestures[i].pattern);
             IniPut(L"Gesture", (n + L"Action").c_str(), ActionToString(c.gestures[i].action));
         } else {
-            WritePrivateProfileStringW(L"Gesture", n.c_str(), nullptr, g_iniPath.c_str());
-            WritePrivateProfileStringW(L"Gesture", (n + L"Action").c_str(), nullptr, g_iniPath.c_str());
+            IniDel(L"Gesture", n.c_str());
+            IniDel(L"Gesture", (n + L"Action").c_str());
+        }
+    }
+}
+
+static const int kMaxProfiles = 8;
+static const wchar_t* kMouseSecs[] = { L"Buttons", L"Chords", L"Scroll", L"Gesture", L"LongPress", L"DoubleClick" };
+
+void SaveConfig(const Config& c) {
+    EnsureIniFile();
+    g_secPre.clear(); g_mouseOnly = false;
+    SaveBody(c);
+    IniPut(L"Profiles", L"ShowSwitch", c.profileOsd);
+    IniPut(L"Profiles", L"Count", (int)c.profiles.size());
+    for (int i = 0; i < kMaxProfiles; i++) {
+        std::wstring pre = L"P" + std::to_wstring(i + 1) + L".";
+        std::wstring k = L"P" + std::to_wstring(i + 1);
+        if (i < (int)c.profiles.size()) {
+            IniPut(L"Profiles", (k + L"Id").c_str(), c.profiles[i].id);
+            IniPut(L"Profiles", (k + L"Name").c_str(), c.profiles[i].name);
+            g_secPre = pre; g_mouseOnly = true;
+            SaveBody(c.profiles[i].cfg);
+            g_secPre.clear(); g_mouseOnly = false;
+        } else {
+            IniDel(L"Profiles", (k + L"Id").c_str());
+            IniDel(L"Profiles", (k + L"Name").c_str());
+            for (auto sec : kMouseSecs) WritePrivateProfileStringW((pre + sec).c_str(), nullptr, nullptr, g_iniPath.c_str());
         }
     }
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, g_iniPath.c_str());  // flush
     g_iniTime = GetIniTime();
 }
 
+Config MergeMouse(const Config& base, const Config& m) {
+    Config r = base;
+    for (int b = 0; b < B_COUNT; b++) { r.button[b] = m.button[b]; r.longPress[b] = m.longPress[b]; r.dblClick[b] = m.dblClick[b]; }
+    r.chords = m.chords; r.chordDelay = m.chordDelay; r.chordMove = m.chordMove;
+    r.trigger = m.trigger; r.clickIfNoMove = m.clickIfNoMove; r.dragThreshold = m.dragThreshold; r.lrTimeout = m.lrTimeout;
+    r.vSpeed = m.vSpeed; r.hSpeed = m.hSpeed; r.accel = m.accel; r.reverse = m.reverse; r.hReverse = m.hReverse;
+    r.horizontal = m.horizontal; r.swapAxis = m.swapAxis; r.axisLock = m.axisLock; r.vThreshold = m.vThreshold;
+    r.hThreshold = m.hThreshold; r.realWheel = m.realWheel; r.cursorChange = m.cursorChange;
+    r.inertia = m.inertia; r.inertiaLen = m.inertiaLen;
+    r.gestureBtn = m.gestureBtn; r.gestureDist = m.gestureDist; r.gestureShow = m.gestureShow; r.gestureFreeze = m.gestureFreeze;
+    r.gestures = m.gestures;
+    r.longMs = m.longMs; r.dblMs = m.dblMs;
+    return r;
+}
+
 void ResetGesturesToDefault(Config& c) { c.gestures = DefaultGestures(); }
 
+static Config LoadBody();
 void LoadConfig() {
     bool fresh = GetFileAttributesW(g_iniPath.c_str()) == INVALID_FILE_ATTRIBUTES;
     Config c;
@@ -367,6 +424,29 @@ void LoadConfig() {
         g_cfg = c;
         return;
     }
+    g_secPre.clear();
+    c = LoadBody();
+    c.profileOsd = IniBool(L"Profiles", L"ShowSwitch", true);
+    int n = std::min(kMaxProfiles, std::max(0, IniInt(L"Profiles", L"Count", 0)));
+    for (int i = 0; i < n; i++) {
+        std::wstring k = L"P" + std::to_wstring(i + 1);
+        MouseProfile mp;
+        mp.id = IniGet(L"Profiles", (k + L"Id").c_str(), L"");
+        mp.name = IniGet(L"Profiles", (k + L"Name").c_str(), L"");
+        if (mp.id.empty()) continue;
+        g_secPre = k + L".";
+        mp.cfg = LoadBody();
+        g_secPre.clear();
+        if (mp.name.empty()) mp.name = mp.id;
+        c.profiles.push_back(mp);
+    }
+    g_cfg = c;
+    g_iniTime = GetIniTime();
+}
+
+static Config LoadBody() {
+    Config c;
+    c.gestures = DefaultGestures();
     c.enabled = IniBool(L"General", L"Enabled", true);
     for (int b = 0; b < B_COUNT; b++) c.button[b] = ParseAction(IniGet(L"Buttons", kBtnNames[b], L"pass"));
 
@@ -450,8 +530,7 @@ void LoadConfig() {
             if (!g.pattern.empty()) c.gestures.push_back(g);
         }
     }
-    g_cfg = c;
-    g_iniTime = GetIniTime();
+    return c;
 }
 
 // ---------------------------------------------------------------------------

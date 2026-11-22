@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#define POINTERKIT_VERSION L"2.3.0"
+#define POINTERKIT_VERSION L"2.4.0"
 
 // ---------------------------------------------------------------------------
 // ボタン・アクション
@@ -69,6 +69,7 @@ extern const wchar_t* kEdgeLabels[4];
 extern const wchar_t* kEdgeActNames[E_COUNT];
 extern const wchar_t* kEdgeActLabels[E_COUNT];
 
+struct MouseProfile;
 struct Config {
     bool enabled = true;
     Action button[B_COUNT];
@@ -130,7 +131,17 @@ struct Config {
     std::vector<std::wstring> usKeyboards;   // US配列として登録したキーボード（VID_xxxx&PID_xxxx など）
     std::wstring usHotkey;                   // 手動で切り替えるショートカット
     bool usCaps = true;                      // CapsLock を US 配列と同じ働きにする
+
+    // マウスごとの設定（最後に動かしたマウスの設定に自動で切り替え）
+    std::vector<MouseProfile> profiles;
+    bool profileOsd = true;                  // 切り替えたときに画面に表示する
 };
+struct MouseProfile {
+    std::wstring id;       // VID_xxxx&PID_xxxx など
+    std::wstring name;     // 表示名
+    Config cfg;            // このマウスの設定（使うのはマウスに関する項目だけ）
+};
+Config MergeMouse(const Config& base, const Config& m);   // base のマウス項目を m のものに置き換える
 extern const wchar_t* kCornerNames[4];
 extern const wchar_t* kCornerLabels[4];
 
@@ -201,6 +212,10 @@ static const ULONG_PTR kInputMagic = 0x4F4E454DUL;   // 自分が送った入力
 void QueueInputExt(const INPUT* in, size_t n);       // hook.cpp：送信用スレッド経由で SendInput
 struct KbInfo { std::wstring id, name; };
 std::vector<KbInfo> ListKeyboards(bool names = true);
+std::vector<KbInfo> ListMice(bool names = true);
+std::wstring DeviceIdFromHandle(HANDLE h);   // 生の入力のデバイス → ID（キャッシュあり）
+std::wstring LastMouseId();                  // 最後に動かしたマウスの ID（設定画面を開いている間だけ）
+int ActiveProfile();                         // いま使っているマウスごとの設定（-1 = 共通）
 LRESULT UsKeyboardProc(HHOOK hook, int n, WPARAM wp, LPARAM lp);
 bool UsActive();
 void UpdateUsState();

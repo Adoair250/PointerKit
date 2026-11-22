@@ -82,7 +82,8 @@ static int Off() { return NavW() - 220; }   // 左メニューを細くした分
 static HWND g_dlg = nullptr;
 static HFONT g_font = nullptr, g_fontBold = nullptr;
 static int g_dpi = 96;
-enum { P_BUTTONS, P_TAP, P_CHORDS, P_SCROLL, P_GESTURE, P_CORNER, P_TOUCHPAD, P_KEYBOARD, P_GENERAL, kPages };
+enum { P_BUTTONS, P_TAP, P_CHORDS, P_SCROLL, P_GESTURE, P_CORNER, P_MICE, P_TOUCHPAD, P_KEYBOARD, P_GENERAL, kPages };
+static bool IsMousePage(int p) { return p <= P_GESTURE; }   // マウスごとに変えられるページ
 static std::vector<HWND> g_pages[kPages];
 static int g_curPage = 0;
 
@@ -113,6 +114,7 @@ enum {
     IDC_CN_ACT = 1860, IDC_CN_KEY = 1870, IDC_CN_DELAY = 1880, IDC_CN_FULL,
     IDC_THEME = 1890, IDC_EXPORT, IDC_IMPORT,
     IDC_US_KB = 1900, IDC_US_MODE = 1910, IDC_US_HOT, IDC_US_CAPS, IDC_US_STATUS,
+    IDC_MS_USE = 1950, IDC_MS_OSD = 1960, IDC_MS_LAST, IDC_PROF_SEL, IDC_PROF_LBL,
     IDC_OK = 1500, IDC_CANCEL, IDC_APPLY,
 };
 
@@ -316,9 +318,9 @@ static const int kNavW = 220;                // 左メニューの幅
 static const int PX = kNavW + 36, PY = 84;   // ページ内側の原点（カードの内側）
 static const int kWinW = PX + 560 + 36, kWinH = 610;
 static const wchar_t* kPageTitles[kPages] = { L"ボタン", L"長押し・2回押し", L"同時押し", L"スクロール", L"ジェスチャー",
-                                              L"画面の四隅", L"タッチパッド", L"キーボード", L"全般" };
+                                              L"画面の四隅", L"マウスごとの設定", L"タッチパッド", L"キーボード", L"全般" };
 // Segoe Fluent Icons（Windows 11）／Segoe MDL2 Assets（Windows 10）のアイコン
-static const wchar_t* kPageIcons[kPages] = { L"\uE962", L"\uE916", L"\uE71D", L"\uE8CB", L"\uE7C9", L"\uE740", L"\uEDA4", L"\uE765", L"\uE713" };
+static const wchar_t* kPageIcons[kPages] = { L"\uE962", L"\uE916", L"\uE71D", L"\uE8CB", L"\uE7C9", L"\uE740", L"\uE8B7", L"\uEDA4", L"\uE765", L"\uE713" };
 
 static void BuildButtonsPage() {
     const int p = P_BUTTONS;
@@ -485,6 +487,83 @@ static void BuildKeyboardPage() {
              L"※ Ctrl・Alt・Win と一緒に押したキーは変換しません（Alt+` で日本語入力を切り替えられます）。\n"
              L"※ 自動のときも、手動で切り替えた状態はキーボードをつなぎ直すまで続きます。",
           PX, PY + 362, 550, 60);
+}
+
+// ---------------------------------------------------------------------------
+// マウスごとの設定
+// ---------------------------------------------------------------------------
+static const int kMaxMice = 6;
+static std::vector<std::wstring> g_msIds, g_msNames;   // 画面に並べたマウス（チェック欄の順）
+static Config g_ui;          // 設定画面で編集中の内容（共通 + マウスごとの設定）
+static int g_editSlot = -1;  // いま画面に出しているのは -1 = 共通、0〜 = g_ui.profiles の番号
+
+static int ProfileIndex(const std::wstring& id) {
+    for (int i = 0; i < (int)g_ui.profiles.size(); i++) if (g_ui.profiles[i].id == id) return i;
+    return -1;
+}
+// 画面に出す設定（マウスごとの設定を選んでいるときは、マウスの項目だけそのマウスのもの）
+static Config ViewConfig() {
+    if (g_editSlot < 0 || g_editSlot >= (int)g_ui.profiles.size()) return g_ui;
+    return MergeMouse(g_ui, g_ui.profiles[g_editSlot].cfg);
+}
+
+static void BuildMicePage() {
+    const int p = P_MICE;
+    Label(p, L"マウスを何台か使うとき、マウスごとに別の設定にできます。チェックしたマウスは専用の設定を持ち、\n"
+             L"そのマウスを動かすと自動で切り替わります。チェックしていないマウスは共通の設定を使います。", PX, PY, 550, 36);
+    Label(p, L"マウス（専用の設定を使うものにチェック）", PX, PY + 50, 550, 20, true);
+    g_msIds.clear(); g_msNames.clear();
+    for (auto& m : ListMice()) { g_msIds.push_back(m.id); g_msNames.push_back(m.name); }
+    for (auto& pr : g_cfg.profiles)
+        if (std::find(g_msIds.begin(), g_msIds.end(), pr.id) == g_msIds.end()) { g_msIds.push_back(pr.id); g_msNames.push_back(pr.name); }
+    if (g_msIds.size() > (size_t)kMaxMice) { g_msIds.resize(kMaxMice); g_msNames.resize(kMaxMice); }
+    for (size_t i = 0; i < g_msIds.size(); i++) {
+        std::wstring t = g_msNames[i] + L"（" + g_msIds[i] + L"）";
+        Check(p, t.c_str(), PX, PY + 74 + (int)i * 26, 550, IDC_MS_USE + (int)i);
+    }
+    if (g_msIds.empty()) Label(p, L"マウスが見つかりません。", PX, PY + 76, 400);
+    Label(p, L"", PX, PY + 240, 550, 20, true);
+    SetWindowLongPtrW(g_pages[p].back(), GWLP_ID, IDC_MS_LAST);
+    Check(p, L"切り替わったときに画面に小さく表示する", PX, PY + 268, 500, IDC_MS_OSD);
+    Label(p, L"設定のしかた",PX, PY + 306, 300, 20, true);
+    Label(p, L"「ボタン」〜「ジェスチャー」のページの右上にある「設定するマウス」で、どのマウスの設定を変えるか選びます。\n"
+             L"チェックを入れたときは、いまの共通の設定がそのマウスにコピーされます。チェックを外すと、そのマウスの設定は消えます。\n"
+             L"※ 同じ機種のマウスを2台つないだときは、見分けられないため同じ設定になります。",
+          PX, PY + 330, 550, 76);
+}
+
+// 「設定するマウス」の選択肢を作り直す
+static void FillProfileCombo() {
+    HWND cb = Item(IDC_PROF_SEL);
+    if (!cb) return;
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)L"共通（ほかのマウスすべて）");
+    for (auto& pr : g_ui.profiles) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)pr.name.c_str());
+    SendMessageW(cb, CB_SETCURSEL, g_editSlot + 1, 0);
+}
+static void UpdateProfileVisibility() {
+    bool show = IsMousePage(g_curPage) && !g_ui.profiles.empty();
+    if (Item(IDC_PROF_SEL)) ShowWindow(Item(IDC_PROF_SEL), show ? SW_SHOW : SW_HIDE);
+    if (Item(IDC_PROF_LBL)) ShowWindow(Item(IDC_PROF_LBL), show ? SW_SHOW : SW_HIDE);
+}
+static void RefreshMiceUi() {
+    for (size_t i = 0; i < g_msIds.size(); i++) SetCheck(IDC_MS_USE + (int)i, ProfileIndex(g_msIds[i]) >= 0);
+    SetCheck(IDC_MS_OSD, g_ui.profileOsd);
+    FillProfileCombo();
+    UpdateProfileVisibility();
+}
+static void UpdateLastMouse() {
+    if (!Item(IDC_MS_LAST)) return;
+    std::wstring id = LastMouseId();
+    std::wstring t = L"いま動かしたマウス：";
+    if (id.empty()) t += L"（マウスを少し動かしてください）";
+    else {
+        std::wstring name = id;
+        for (size_t i = 0; i < g_msIds.size(); i++) if (g_msIds[i] == id) name = g_msNames[i] + L"（" + id + L"）";
+        t += name;
+    }
+    wchar_t cur[512]; GetWindowTextW(Item(IDC_MS_LAST), cur, 512);
+    if (t != cur) SetWindowTextW(Item(IDC_MS_LAST), t.c_str());
 }
 
 static void BuildCornerPage() {
@@ -781,8 +860,8 @@ static void LoadToUi(const Config& c) {
 }
 
 // 画面から Config を作る。問題があれば error に説明を入れて false
-static bool ReadFromUi(Config& c, std::wstring& error) {
-    c = g_cfg;
+static bool ReadPages(Config& c, std::wstring& error) {
+    c = ViewConfig();
     for (int b = 0; b < B_COUNT; b++) {
         c.button[b].type = (ActType)std::max(0, GetSel(IDC_BTN_ACT + b));
         c.button[b].keys = GetText(IDC_BTN_KEY + b);
@@ -910,6 +989,67 @@ static bool ReadFromUi(Config& c, std::wstring& error) {
     return true;
 }
 
+// 画面の内容を g_ui に取り込んだ「全体の設定」を作る
+static bool ReadFromUi(Config& c, std::wstring& error) {
+    Config t;
+    if (!ReadPages(t, error)) {
+        if (g_editSlot >= 0 && g_editSlot < (int)g_ui.profiles.size()) error = L"［" + g_ui.profiles[g_editSlot].name + L"］" + error;
+        return false;
+    }
+    t.profileOsd = GetCheck(IDC_MS_OSD);
+    if (g_editSlot < 0 || g_editSlot >= (int)g_ui.profiles.size()) {
+        c = t;
+        c.profiles = g_ui.profiles;
+    } else {
+        c = MergeMouse(t, g_ui);           // マウス以外の項目は画面のもの、マウスの項目は共通のまま
+        c.profiles = g_ui.profiles;
+        t.profiles.clear();
+        c.profiles[g_editSlot].cfg = t;     // このマウスの設定
+    }
+    return true;
+}
+// 全体の設定を画面に出す（slot = どのマウスの設定を出すか）
+static void LoadAll(const Config& c, int slot = -1) {
+    g_ui = c;
+    g_editSlot = slot >= 0 && slot < (int)g_ui.profiles.size() ? slot : -1;
+    LoadToUi(ViewConfig());
+    RefreshMiceUi();
+}
+// いまの画面の内容を g_ui に取り込む（失敗したらメッセージを出して false）
+static bool CommitUi() {
+    Config c; std::wstring err;
+    if (!ReadFromUi(c, err)) { MessageBoxW(g_dlg, err.c_str(), L"PointerKit", MB_OK | MB_ICONWARNING); return false; }
+    g_ui = c;
+    return true;
+}
+static void OnProfileSelect() {
+    int sel = (int)SendMessageW(Item(IDC_PROF_SEL), CB_GETCURSEL, 0, 0) - 1;
+    if (sel == g_editSlot) return;
+    if (!CommitUi()) { SendMessageW(Item(IDC_PROF_SEL), CB_SETCURSEL, g_editSlot + 1, 0); return; }
+    LoadAll(g_ui, sel);
+}
+static void OnMouseToggle(int i) {
+    if (i < 0 || i >= (int)g_msIds.size()) return;
+    bool on = GetCheck(IDC_MS_USE + i);
+    SetCheck(IDC_MS_USE + i, !on);   // 取り込みが済むまで元に戻しておく
+    if (!CommitUi()) return;
+    int idx = ProfileIndex(g_msIds[i]);
+    if (on && idx < 0) {
+        if (g_ui.profiles.size() >= 8) { MessageBoxW(g_dlg, L"専用の設定を使えるマウスは 8 台までです。", L"PointerKit", MB_OK | MB_ICONWARNING); RefreshMiceUi(); return; }
+        MouseProfile pr;
+        pr.id = g_msIds[i];
+        pr.name = g_msNames[i];
+        pr.cfg = g_ui;                 // いまの共通の設定をコピー
+        pr.cfg.profiles.clear();
+        g_ui.profiles.push_back(pr);
+    } else if (!on && idx >= 0) {
+        g_ui.profiles.erase(g_ui.profiles.begin() + idx);
+        if (g_editSlot == idx) g_editSlot = -1;
+        else if (g_editSlot > idx) g_editSlot--;
+    }
+    LoadAll(g_ui, g_editSlot);
+}
+
 static const UINT WM_REOPEN = WM_APP + 50;
 static bool Apply() {
     Config c;
@@ -918,6 +1058,7 @@ static bool Apply() {
         MessageBoxW(g_dlg, err.c_str(), L"PointerKit", MB_OK | MB_ICONWARNING);
         return false;
     }
+    g_ui = c;
     ApplyNewConfig(c);
     if (GetCheck(IDC_STARTUP) != IsStartup()) SetStartup(GetCheck(IDC_STARTUP));
     if (WantDark(c.theme) != g_dark) PostMessageW(g_dlg, WM_REOPEN, 0, 0);   // 色を変えたら開き直す
@@ -932,13 +1073,13 @@ static void Reopen() {
     Config tmp;
     std::wstring err;
     bool ok = ReadFromUi(tmp, err);
-    int page = g_curPage;
+    int page = g_curPage, slot = g_editSlot;
     WINDOWPLACEMENT wp = { sizeof(wp) };
     GetWindowPlacement(g_dlg, &wp);
     DestroyWindow(g_dlg);
     ShowSettings();
     if (!g_dlg) return;
-    if (ok) LoadToUi(tmp);
+    if (ok) LoadAll(tmp, slot);
     ShowPage(page);
     SetWindowPlacement(g_dlg, &wp);
 }
@@ -977,6 +1118,11 @@ static void LayoutBottom() {
         SetWindowPos(g_monLbl, nullptr, x, y, std::max(S(40), xOk - S(12) - x), bh, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (g_nav) SetWindowPos(g_nav, nullptr, 0, 0, S(NavW()), c.bottom, SWP_NOZORDER | SWP_NOACTIVATE);
+    if (HWND pc = GetDlgItem(g_dlg, IDC_PROF_SEL)) {
+        int w = S(240), x = c.right - S(20) - w;
+        SetWindowPos(pc, nullptr, x, S(34), w, S(300), SWP_NOZORDER | SWP_NOACTIVATE);
+        if (HWND pl = GetDlgItem(g_dlg, IDC_PROF_LBL)) SetWindowPos(pl, nullptr, x - S(112), S(37), S(108), S(20), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     InvalidateRect(g_dlg, nullptr, TRUE);
 }
 
@@ -986,6 +1132,8 @@ static void ShowPage(int page) {
     if (g_dlg) { RECT t; GetClientRect(g_dlg, &t); t.left = S(NavW()); t.bottom = S(PY - 16); InvalidateRect(g_dlg, &t, TRUE); }
     for (int p = 0; p < kPages; p++)
         for (HWND h : g_pages[p]) ShowWindow(h, p == page ? SW_SHOW : SW_HIDE);
+    UpdateProfileVisibility();
+    if (page == P_MICE) UpdateLastMouse();
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,10 +1292,12 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if ((code == BN_CLICKED || code == BN_DOUBLECLICKED) && g_toggles.count((HWND)lp)) {
             SetCheck(id, !GetCheck(id));
             code = BN_CLICKED;
+            if (id >= IDC_MS_USE && id < IDC_MS_USE + kMaxMice) { OnMouseToggle(id - IDC_MS_USE); return 0; }
             UpdateKeyEnables();
             if (id == IDC_TP_EN) InvalidateRect(Item(IDC_TP_PREVIEW), nullptr, FALSE);
             return 0;
         }
+        if (code == CBN_SELCHANGE && id == IDC_PROF_SEL) { OnProfileSelect(); return 0; }
         if (code == CBN_SELCHANGE || (code == BN_CLICKED && id == IDC_TP_EN) || (code == EN_CHANGE && id >= IDC_TP_W && id < IDC_TP_W + 4)) {
             UpdateKeyEnables();
             if (Item(IDC_TP_PREVIEW)) InvalidateRect(Item(IDC_TP_PREVIEW), nullptr, FALSE);
@@ -1191,7 +1341,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 MessageBoxW(h, L"PointerKit の設定ファイルではないようです。", L"PointerKit", MB_OK | MB_ICONWARNING);
                 return 0;
             }
-            LoadToUi(c);
+            LoadAll(c);
             MessageBoxW(h, L"設定を読み込みました。\n「OK」または「適用」を押すと反映されます。", L"PointerKit", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -1200,7 +1350,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                             L"PointerKit", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
                 Config def;
                 ResetGesturesToDefault(def);
-                LoadToUi(def);
+                LoadAll(def);
             }
             return 0;
         }
@@ -1249,7 +1399,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
-        if (wp == TIMER_USSTATUS) { UpdateUsStatus(); return 0; }
+        if (wp == TIMER_USSTATUS) { UpdateUsStatus(); if (g_curPage == P_MICE) UpdateLastMouse(); return 0; }
         if (wp == TIMER_WHEELMSG) {
             KillTimer(h, TIMER_WHEELMSG);
             SetWindowTextW(g_monLbl, L"マウスのボタンを押すと、ここに表示されます");
@@ -1268,6 +1418,11 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (ctl == g_monLbl) {
             SetBkColor(dc, kWinBg);
             SetTextColor(dc, g_accent);
+            return (LRESULT)g_winBrush;
+        }
+        if (ctl == GetDlgItem(g_dlg, IDC_PROF_LBL)) {
+            SetBkColor(dc, kWinBg);
+            SetTextColor(dc, kText);
             return (LRESULT)g_winBrush;
         }
         SetBkColor(dc, kCardBg);
@@ -1455,10 +1610,13 @@ void ShowSettings() {
     BuildScrollPage();
     BuildGesturePage();
     BuildCornerPage();
+    BuildMicePage();
     BuildTouchpadPage();
     BuildKeyboardPage();
     BuildGeneralPage();
 
+    Make(-1, L"STATIC", L"設定するマウス", SS_RIGHT, 0, 0, 108, 20, IDC_PROF_LBL);
+    Make(-1, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0, 0, 240, 300, IDC_PROF_SEL);
     Make(-1, L"BUTTON", L"OK", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 110, 34, IDC_OK);
     Make(-1, L"BUTTON", L"キャンセル", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 110, 34, IDC_CANCEL);
     Make(-1, L"BUTTON", L"適用", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 110, 34, IDC_APPLY);
@@ -1469,7 +1627,7 @@ void ShowSettings() {
     if (!g_hiBrush) g_hiBrush = CreateSolidBrush(kHiColor);
     SetInputMonitor(g_dlg);
     SetTouchpadMonitor(g_dlg);
-    SetTimer(g_dlg, TIMER_USSTATUS, 1000, nullptr);
+    SetTimer(g_dlg, TIMER_USSTATUS, 500, nullptr);
 
     // 前回、左メニューを細くしていたらその状態で開く
     g_navCollapsed = false;
@@ -1480,7 +1638,7 @@ void ShowSettings() {
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
-    LoadToUi(g_cfg);
+    LoadAll(g_cfg);
     ShowPage(0);
     ShowWindow(g_dlg, SW_SHOW);
     SetForegroundWindow(g_dlg);
